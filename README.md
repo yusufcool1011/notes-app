@@ -7,7 +7,7 @@ This project is a simple full-stack **Markdown notes** app:
 - **Frontend:** React + Vite + Tailwind, Markdown preview
 - **Production:** Nginx serves the built frontend and proxies `/api/*` to the backend on **localhost:4000**
 
-## Quick start (Pi / production style)
+## Quick start
 
 ### 1) Backend (runs on localhost:4000)
 ```bash
