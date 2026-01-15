@@ -1,0 +1,21 @@
+{
+  "name": "markdown-notes-server",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "pm2:start": "pm2 start index.js --name notes-api && pm2 save",
+    "pm2:stop": "pm2 stop notes-api || true",
+    "pm2:logs": "pm2 logs notes-api"
+  },
+  "dependencies": {
+    "apache-md5": "^1.1.8",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "sqlite3": "^5.1.7"
+  }
+}
