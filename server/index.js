@@ -1,108 +1,112 @@
 import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import morgan from "morgan";
-import "dotenv/config";
-import { initDb, db } from "./db.js";
-import { basicAuth } from "./auth.js";
-import { addUser, userExists, usernameIsValid, passwordIsValid } from "./htpasswd.js";
+import fs from "fs";
+import path from "path";
+import auth from "basic-auth";
+import Database from "better-sqlite3";
+import { execFile } from "child_process";
 
 const app = express();
-const PORT = Number(process.env.PORT || 4000);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost";
+const PORT = 4000;
 
-initDb();
+// ---------- Paths ----------
+const DATA_DIR = path.resolve("server/data");
+const DB_PATH = path.join(DATA_DIR, "notes.db");
+const HTPASSWD_FILE = path.join(DATA_DIR, ".htpasswd");
+const HTPASSWD_BIN = "/usr/bin/htpasswd";
 
-app.use(helmet());
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: false }));
-app.use(express.json({ limit: "1mb" }));
-app.use(morgan("dev"));
+// ---------- Ensure data dir ----------
+fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(HTPASSWD_FILE)) {
+  fs.writeFileSync(HTPASSWD_FILE, "");
+}
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+// ---------- Middleware ----------
+app.use(express.json());
 
+// ---------- Database ----------
+const db = new Database(DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// ---------- Auth ----------
+function verifyUser(req, res, next) {
+  const credentials = auth(req);
+  if (!credentials) {
+    res.set("WWW-Authenticate", "Basic");
+    return res.status(401).end();
+  }
+
+  const lines = fs.readFileSync(HTPASSWD_FILE, "utf8").split("\n");
+  const userLine = lines.find(l => l.startsWith(credentials.name + ":"));
+  if (!userLine) return res.status(401).end();
+
+  execFile(
+    HTPASSWD_BIN,
+    ["-vb", HTPASSWD_FILE, credentials.name, credentials.pass],
+    (err) => {
+      if (err) return res.status(401).end();
+      req.user = credentials.name;
+      next();
+    }
+  );
+}
+
+// ---------- Routes ----------
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+// 🔐 REGISTER (FIXED)
 app.post("/api/register", (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password } = req.body;
 
-  if (!usernameIsValid(username)) {
-    return res.status(400).json({ error: "Username must be 3-32 chars: letters, numbers, . _ -" });
-  }
-  if (!passwordIsValid(password)) {
-    return res.status(400).json({ error: "Password must be 8-72 characters" });
-  }
-  if (userExists(username)) {
-    return res.status(409).json({ error: "Username already exists" });
+  if (!username || !password) {
+    return res.status(400).json({ error: "Missing fields" });
   }
 
-  addUser(username, password);
-  return res.status(201).json({ ok: true });
-});
-
-app.get("/api/me", basicAuth, (req, res) => {
-  res.json({ username: req.user.username });
-});
-
-app.get("/api/notes", basicAuth, (req, res) => {
-  const owner = req.user.username;
-  db.all(
-    `SELECT id, title, content, updated_at FROM notes WHERE owner = ? ORDER BY updated_at DESC`,
-    [owner],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: "DB error" });
-      res.json({ notes: rows });
+  execFile(
+    HTPASSWD_BIN,
+    ["-b", HTPASSWD_FILE, username, password],
+    (err) => {
+      if (err) {
+        console.error("htpasswd error:", err);
+        return res.status(500).json({ error: "Registration failed" });
+      }
+      res.json({ ok: true });
     }
   );
 });
 
-app.post("/api/notes", basicAuth, (req, res) => {
-  const owner = req.user.username;
-  const { title, content } = req.body || {};
+// 🔐 LOGIN CHECK
+app.get("/api/login", verifyUser, (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
 
-  const safeTitle = (title || "").trim() || "Untitled";
-  const safeContent = (content || "").toString();
+// 📝 GET NOTES
+app.get("/api/notes", verifyUser, (req, res) => {
+  const stmt = db.prepare("SELECT * FROM notes WHERE user = ?");
+  res.json(stmt.all(req.user));
+});
 
-  const updatedAt = new Date().toISOString();
-  db.run(
-    `INSERT INTO notes (owner, title, content, updated_at) VALUES (?, ?, ?, ?)`,
-    [owner, safeTitle, safeContent, updatedAt],
-    function (err) {
-      if (err) return res.status(500).json({ error: "DB error" });
-      res.status(201).json({
-        note: { id: this.lastID, title: safeTitle, content: safeContent, updated_at: updatedAt }
-      });
-    }
+// 📝 CREATE NOTE
+app.post("/api/notes", verifyUser, (req, res) => {
+  const { title, content } = req.body;
+  const stmt = db.prepare(
+    "INSERT INTO notes (user, title, content) VALUES (?, ?, ?)"
   );
+  stmt.run(req.user, title, content);
+  res.json({ ok: true });
 });
 
-app.put("/api/notes/:id", basicAuth, (req, res) => {
-  const owner = req.user.username;
-  const id = Number(req.params.id);
-  const { title, content } = req.body || {};
-  const updatedAt = new Date().toISOString();
-
-  db.run(
-    `UPDATE notes SET title = ?, content = ?, updated_at = ?
-     WHERE id = ? AND owner = ?`,
-    [(title || "Untitled").trim(), (content || "").toString(), updatedAt, id, owner],
-    function (err) {
-      if (err) return res.status(500).json({ error: "DB error" });
-      if (this.changes === 0) return res.status(404).json({ error: "Not found" });
-      res.json({ ok: true, updated_at: updatedAt });
-    }
-  );
-});
-
-app.delete("/api/notes/:id", basicAuth, (req, res) => {
-  const owner = req.user.username;
-  const id = Number(req.params.id);
-
-  db.run(`DELETE FROM notes WHERE id = ? AND owner = ?`, [id, owner], function (err) {
-    if (err) return res.status(500).json({ error: "DB error" });
-    if (this.changes === 0) return res.status(404).json({ error: "Not found" });
-    res.json({ ok: true });
-  });
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://127.0.0.1:${PORT} (behind Nginx)`);
-  console.log(`CORS allowed origin: ${CLIENT_ORIGIN}`);
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on http://localhost:${PORT}`);
 });
